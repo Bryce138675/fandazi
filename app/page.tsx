@@ -3,6 +3,10 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
+import {
+  getCloudState,
+  patchCloudState,
+} from "@/lib/fandaziCloud";
 
 type FridgeItem = {
   id: number;
@@ -31,66 +35,134 @@ type MealLog = {
   completedAt: string;
 };
 
+const FRIDGE_KEY = "fandazi-fridge-items";
+const DINNER_KEY = "fandazi-tonight-dinner";
+const MEAL_LOG_KEY = "fandazi-meal-logs";
+
 export default function Home() {
   const [fridgeItems, setFridgeItems] = useState<FridgeItem[]>([]);
-
   const [tonightDinner, setTonightDinner] =
     useState<TonightDinner | null>(null);
+
+  const [mealLogs, setMealLogs] = useState<MealLog[]>([]);
 
   const [showCompleteForm, setShowCompleteForm] =
     useState(false);
 
   const [cookedBy, setCookedBy] = useState("一起做");
-
   const [rating, setRating] = useState(5);
-
-  const [eatAgain, setEatAgain] =
-    useState("必须再吃");
-
+  const [eatAgain, setEatAgain] = useState("必须再吃");
   const [notes, setNotes] = useState("");
 
+  const [syncStatus, setSyncStatus] =
+    useState("正在连接云端...");
+
   useEffect(() => {
-    const savedFridge = localStorage.getItem(
-      "fandazi-fridge-items"
-    );
+    loadSharedData();
+  }, []);
+
+  async function loadSharedData() {
+    const savedFridge = localStorage.getItem(FRIDGE_KEY);
+    const savedDinner = localStorage.getItem(DINNER_KEY);
+    const savedLogs = localStorage.getItem(MEAL_LOG_KEY);
+
+    let localFridge: FridgeItem[] = [];
+    let localDinner: TonightDinner | null = null;
+    let localLogs: MealLog[] = [];
 
     if (savedFridge) {
       try {
-        setFridgeItems(JSON.parse(savedFridge));
+        localFridge = JSON.parse(savedFridge);
+        setFridgeItems(localFridge);
       } catch {
-        setFridgeItems([]);
+        localFridge = [];
       }
     }
-
-    const savedDinner = localStorage.getItem(
-      "fandazi-tonight-dinner"
-    );
 
     if (savedDinner) {
       try {
-        setTonightDinner(JSON.parse(savedDinner));
+        localDinner = JSON.parse(savedDinner);
+        setTonightDinner(localDinner);
       } catch {
-        setTonightDinner(null);
+        localDinner = null;
       }
     }
-  }, []);
-
-  function completeDinner() {
-    if (!tonightDinner) return;
-
-    const savedLogs = localStorage.getItem(
-      "fandazi-meal-logs"
-    );
-
-    let mealLogs: MealLog[] = [];
 
     if (savedLogs) {
       try {
-        mealLogs = JSON.parse(savedLogs);
+        localLogs = JSON.parse(savedLogs);
+        setMealLogs(localLogs);
       } catch {
-        mealLogs = [];
+        localLogs = [];
       }
     }
+
+    const cloudState = await getCloudState();
+
+    if (!cloudState) {
+      setSyncStatus("云端读取失败，本机仍可使用");
+      return;
+    }
+
+    if (Array.isArray(cloudState.fridgeItems)) {
+      const cloudFridge =
+        cloudState.fridgeItems as FridgeItem[];
+
+      setFridgeItems(cloudFridge);
+
+      localStorage.setItem(
+        FRIDGE_KEY,
+        JSON.stringify(cloudFridge)
+      );
+    } else if (localFridge.length > 0) {
+      await patchCloudState({
+        fridgeItems: localFridge,
+      });
+    }
+
+    if (
+      cloudState.tonightDinner &&
+      typeof cloudState.tonightDinner === "object"
+    ) {
+      const cloudDinner =
+        cloudState.tonightDinner as TonightDinner;
+
+      setTonightDinner(cloudDinner);
+
+      localStorage.setItem(
+        DINNER_KEY,
+        JSON.stringify(cloudDinner)
+      );
+    } else if (cloudState.tonightDinner === null) {
+      setTonightDinner(null);
+      localStorage.removeItem(DINNER_KEY);
+    } else if (localDinner) {
+      await patchCloudState({
+        tonightDinner: localDinner,
+      });
+    }
+
+    if (Array.isArray(cloudState.mealLogs)) {
+      const cloudLogs =
+        cloudState.mealLogs as MealLog[];
+
+      setMealLogs(cloudLogs);
+
+      localStorage.setItem(
+        MEAL_LOG_KEY,
+        JSON.stringify(cloudLogs)
+      );
+    } else if (localLogs.length > 0) {
+      await patchCloudState({
+        mealLogs: localLogs,
+      });
+    }
+
+    setSyncStatus("云端已同步 ☁️");
+  }
+
+  async function completeDinner() {
+    if (!tonightDinner) return;
 
     const newLog: MealLog = {
       id: Date.now(),
@@ -103,16 +175,31 @@ export default function Home() {
       completedAt: new Date().toISOString(),
     };
 
-    localStorage.setItem(
-      "fandazi-meal-logs",
-      JSON.stringify([newLog, ...mealLogs])
-    );
+    const nextLogs = [newLog, ...mealLogs];
 
-    localStorage.removeItem(
-      "fandazi-tonight-dinner"
-    );
-
+    setMealLogs(nextLogs);
     setTonightDinner(null);
+
+    localStorage.setItem(
+      MEAL_LOG_KEY,
+      JSON.stringify(nextLogs)
+    );
+
+    localStorage.removeItem(DINNER_KEY);
+
+    setSyncStatus("正在同步...");
+
+    const result = await patchCloudState({
+      mealLogs: nextLogs,
+      tonightDinner: null,
+    });
+
+    setSyncStatus(
+      result
+        ? "已同步 ☁️"
+        : "云端同步失败，本机数据已保存"
+    );
+
     setShowCompleteForm(false);
     setCookedBy("一起做");
     setRating(5);
@@ -120,37 +207,124 @@ export default function Home() {
     setNotes("");
   }
 
+  async function removeTonightDinner() {
+    setTonightDinner(null);
+    localStorage.removeItem(DINNER_KEY);
+
+    setSyncStatus("正在同步...");
+
+    const result = await patchCloudState({
+      tonightDinner: null,
+    });
+
+    setSyncStatus(
+      result
+        ? "已同步 ☁️"
+        : "云端同步失败"
+    );
+  }
+
+  async function refreshFromCloud() {
+    setSyncStatus("正在读取云端...");
+
+    const cloudState = await getCloudState();
+
+    if (!cloudState) {
+      setSyncStatus("读取云端失败");
+      return;
+    }
+
+    if (Array.isArray(cloudState.fridgeItems)) {
+      const cloudFridge =
+        cloudState.fridgeItems as FridgeItem[];
+
+      setFridgeItems(cloudFridge);
+
+      localStorage.setItem(
+        FRIDGE_KEY,
+        JSON.stringify(cloudFridge)
+      );
+    }
+
+    if (
+      cloudState.tonightDinner &&
+      typeof cloudState.tonightDinner === "object"
+    ) {
+      const cloudDinner =
+        cloudState.tonightDinner as TonightDinner;
+
+      setTonightDinner(cloudDinner);
+
+      localStorage.setItem(
+        DINNER_KEY,
+        JSON.stringify(cloudDinner)
+      );
+    } else {
+      setTonightDinner(null);
+      localStorage.removeItem(DINNER_KEY);
+    }
+
+    if (Array.isArray(cloudState.mealLogs)) {
+      const cloudLogs =
+        cloudState.mealLogs as MealLog[];
+
+      setMealLogs(cloudLogs);
+
+      localStorage.setItem(
+        MEAL_LOG_KEY,
+        JSON.stringify(cloudLogs)
+      );
+    }
+
+    setSyncStatus("已读取最新数据 ☁️");
+  }
+
   return (
     <main className="min-h-screen bg-[#fffaf5] pb-32 text-[#2b2b2b]">
       <div className="mx-auto flex min-h-screen max-w-md flex-col px-5 py-8">
         <header className="mb-8">
-          <p className="mb-2 text-sm text-gray-500">
-            Hola
-          </p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="mb-2 text-sm text-gray-500">
+                晚上好 👋
+              </p>
 
-          <h1 className="text-3xl font-bold">
-            一二&布布
-          </h1>
+              <h1 className="text-3xl font-bold">
+                饭搭子
+              </h1>
 
-          <p className="mt-2 text-sm text-gray-500">
-            小笨吃饭助手
+              <p className="mt-2 text-sm text-gray-500">
+                两个人的吃饭小助手
+              </p>
+            </div>
+
+            <button
+              onClick={refreshFromCloud}
+              className="rounded-full bg-white px-3 py-2 text-xs text-gray-500 shadow-sm"
+            >
+              ↻ 刷新
+            </button>
+          </div>
+
+          <p className="mt-3 text-xs text-green-600">
+            {syncStatus}
           </p>
         </header>
 
         <section className="mb-5 rounded-3xl bg-white p-5 shadow-sm">
           <p className="text-sm text-gray-500">
-            今天吃什么？
+            今晚吃什么？
           </p>
 
           <h2 className="mt-2 text-2xl font-semibold">
-            不知道的话，先看看小笨冰箱
+            不知道的话，先看看冰箱
           </h2>
 
           <Link
             href="/recommend"
             className="mt-5 block w-full rounded-2xl bg-[#ff6b57] px-4 py-3 text-center font-medium text-white"
           >
-            看看小笨冰箱能做什么
+            看看冰箱能做什么
           </Link>
         </section>
 
@@ -172,7 +346,7 @@ export default function Home() {
 
                 {tonightDinner.source === "vote" && (
                   <p className="mt-2 text-xs text-[#ff6b57]">
-                    💘 来自一二&布布投票
+                    💘 来自情侣投票
                   </p>
                 )}
               </div>
@@ -199,6 +373,13 @@ export default function Home() {
                 换一道
               </Link>
             </div>
+
+            <button
+              onClick={removeTonightDinner}
+              className="mt-3 w-full text-xs text-gray-400"
+            >
+              清除今晚菜单
+            </button>
           </section>
         )}
 
@@ -215,8 +396,8 @@ export default function Home() {
 
               <div className="mt-2 grid grid-cols-2 gap-2">
                 {[
-                  "一二做的",
-                  "布布做的",
+                  "我做的",
+                  "TA 做的",
                   "一起做",
                   "外卖",
                 ].map((option) => (
@@ -226,8 +407,8 @@ export default function Home() {
                       setCookedBy(option)
                     }
                     className={`rounded-2xl px-3 py-2 text-sm ${cookedBy === option
-                      ? "bg-[#ff6b57] text-white"
-                      : "bg-gray-100 text-gray-600"
+                        ? "bg-[#ff6b57] text-white"
+                        : "bg-gray-100 text-gray-600"
                       }`}
                   >
                     {option}
@@ -242,21 +423,17 @@ export default function Home() {
               </p>
 
               <div className="mt-2 flex gap-2">
-                {[1, 2, 3, 4, 5].map(
-                  (star) => (
-                    <button
-                      key={star}
-                      onClick={() =>
-                        setRating(star)
-                      }
-                      className="text-3xl"
-                    >
-                      {star <= rating
-                        ? "⭐"
-                        : "☆"}
-                    </button>
-                  )
-                )}
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <button
+                    key={star}
+                    onClick={() =>
+                      setRating(star)
+                    }
+                    className="text-3xl"
+                  >
+                    {star <= rating ? "⭐" : "☆"}
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -277,15 +454,12 @@ export default function Home() {
                 <option value="必须再吃">
                   必须再吃 ❤️
                 </option>
-
                 <option value="可以">
                   可以 🙂
                 </option>
-
                 <option value="一般">
                   一般 😐
                 </option>
-
                 <option value="不要了">
                   不要了 ❌
                 </option>
@@ -356,7 +530,7 @@ export default function Home() {
             </div>
 
             <div className="mt-3 font-semibold">
-              熊熊投票
+              情侣投票
             </div>
 
             <div className="mt-1 text-xs text-gray-500">
@@ -367,7 +541,7 @@ export default function Home() {
 
         <section className="mb-5 rounded-3xl bg-white p-5 shadow-sm">
           <p className="text-sm text-gray-500">
-            小笨冰箱状态
+            冰箱状态
           </p>
 
           <div className="mt-4 flex items-center justify-between">
@@ -380,9 +554,7 @@ export default function Home() {
                 {fridgeItems.length > 0
                   ? fridgeItems
                     .slice(0, 4)
-                    .map(
-                      (item) => item.name
-                    )
+                    .map((item) => item.name)
                     .join(" · ")
                   : "冰箱还是空的"}
               </p>
@@ -401,7 +573,7 @@ export default function Home() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-gray-500">
-                一二&布布的记录
+                我们的记录
               </p>
 
               <p className="mt-2 text-lg font-semibold">
