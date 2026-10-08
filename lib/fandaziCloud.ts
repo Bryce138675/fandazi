@@ -32,9 +32,7 @@ export async function getCloudState() {
         return null;
     }
 
-    return (
-        data[0].state as FandaziCloudState
-    );
+    return data[0].state as FandaziCloudState;
 }
 
 export async function saveCloudState(
@@ -58,4 +56,27 @@ export async function saveCloudState(
     }
 
     return data === true;
+}
+
+export async function patchCloudState(
+    patch: Partial<FandaziCloudState>
+) {
+    const { data, error } = await supabase.rpc(
+        "patch_fandazi_household",
+        {
+            p_share_code: FANDAZI_SHARE_CODE,
+            p_patch: patch,
+        }
+    );
+
+    if (error) {
+        console.error(
+            "Failed to patch Fandazi cloud state:",
+            error
+        );
+
+        return null;
+    }
+
+    return data as FandaziCloudState;
 }
