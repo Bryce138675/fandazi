@@ -2,6 +2,10 @@
 
 import { useEffect, useMemo, useState } from "react";
 import BottomNav from "@/components/BottomNav";
+import {
+    getCloudState,
+    patchCloudState,
+} from "@/lib/fandaziCloud";
 
 type MealLog = {
     id: number;
@@ -14,232 +18,332 @@ type MealLog = {
     completedAt: string;
 };
 
+const MEAL_LOG_KEY = "fandazi-meal-logs";
+
 export default function HistoryPage() {
-    const [logs, setLogs] = useState<MealLog[]>([]);
+    const [mealLogs, setMealLogs] = useState<MealLog[]>([]);
+    const [loaded, setLoaded] = useState(false);
+    const [syncStatus, setSyncStatus] =
+        useState("正在连接云端...");
 
     useEffect(() => {
-        const saved = localStorage.getItem("fandazi-meal-logs");
+        loadHistory();
+    }, []);
+
+    async function loadHistory() {
+        const saved = localStorage.getItem(MEAL_LOG_KEY);
+
+        let localLogs: MealLog[] = [];
 
         if (saved) {
             try {
-                setLogs(JSON.parse(saved));
+                localLogs = JSON.parse(saved);
+                setMealLogs(localLogs);
             } catch {
-                setLogs([]);
+                localLogs = [];
             }
         }
-    }, []);
 
-    const stats = useMemo(() => {
-        if (logs.length === 0) {
-            return {
-                total: 0,
-                averageRating: 0,
-                favorite: "还没有",
-            };
+        const cloudState = await getCloudState();
+
+        if (!cloudState) {
+            setLoaded(true);
+            setSyncStatus("云端读取失败，本机仍可使用");
+            return;
         }
 
-        const totalRating = logs.reduce(
-            (sum, log) => sum + log.rating,
-            0
-        );
+        if (Array.isArray(cloudState.mealLogs)) {
+            const cloudLogs =
+                cloudState.mealLogs as MealLog[];
 
-        const countMap: Record<string, number> = {};
+            setMealLogs(cloudLogs);
 
-        logs.forEach((log) => {
-            countMap[log.recipeName] =
-                (countMap[log.recipeName] || 0) + 1;
-        });
+            localStorage.setItem(
+                MEAL_LOG_KEY,
+                JSON.stringify(cloudLogs)
+            );
+        } else if (localLogs.length > 0) {
+            await patchCloudState({
+                mealLogs: localLogs,
+            });
+        }
 
-        const favorite = Object.entries(countMap).sort(
-            (a, b) => b[1] - a[1]
-        )[0]?.[0];
+        setLoaded(true);
+        setSyncStatus("云端已同步 ☁️");
+    }
 
-        return {
-            total: logs.length,
-            averageRating: Number(
-                (totalRating / logs.length).toFixed(1)
-            ),
-            favorite: favorite || "还没有",
-        };
-    }, [logs]);
+    async function refreshFromCloud() {
+        setSyncStatus("正在读取云端...");
 
-    function deleteLog(id: number) {
-        const nextLogs = logs.filter((log) => log.id !== id);
+        const cloudState = await getCloudState();
 
-        setLogs(nextLogs);
+        if (
+            !cloudState ||
+            !Array.isArray(cloudState.mealLogs)
+        ) {
+            setSyncStatus("读取云端失败");
+            return;
+        }
+
+        const cloudLogs =
+            cloudState.mealLogs as MealLog[];
+
+        setMealLogs(cloudLogs);
 
         localStorage.setItem(
-            "fandazi-meal-logs",
-            JSON.stringify(nextLogs)
+            MEAL_LOG_KEY,
+            JSON.stringify(cloudLogs)
+        );
+
+        setSyncStatus("已读取最新数据 ☁️");
+    }
+
+    async function deleteLog(id: number) {
+        const next = mealLogs.filter(
+            (log) => log.id !== id
+        );
+
+        setMealLogs(next);
+
+        localStorage.setItem(
+            MEAL_LOG_KEY,
+            JSON.stringify(next)
+        );
+
+        setSyncStatus("正在同步...");
+
+        const result = await patchCloudState({
+            mealLogs: next,
+        });
+
+        setSyncStatus(
+            result
+                ? "已同步 ☁️"
+                : "同步失败，本机数据已保存"
         );
     }
 
-    function clearAll() {
+    async function clearAll() {
         const confirmed = window.confirm(
             "确定要清空所有吃饭记录吗？"
         );
 
         if (!confirmed) return;
 
-        localStorage.removeItem("fandazi-meal-logs");
-        setLogs([]);
+        setMealLogs([]);
+        localStorage.setItem(
+            MEAL_LOG_KEY,
+            JSON.stringify([])
+        );
+
+        setSyncStatus("正在同步...");
+
+        const result = await patchCloudState({
+            mealLogs: [],
+        });
+
+        setSyncStatus(
+            result
+                ? "已同步 ☁️"
+                : "同步失败"
+        );
+    }
+
+    const totalMeals = mealLogs.length;
+
+    const averageRating = useMemo(() => {
+        if (mealLogs.length === 0) return 0;
+
+        const total = mealLogs.reduce(
+            (sum, log) => sum + log.rating,
+            0
+        );
+
+        return total / mealLogs.length;
+    }, [mealLogs]);
+
+    const favoriteDish = useMemo(() => {
+        if (mealLogs.length === 0) return "暂无";
+
+        const counts: Record<string, number> = {};
+
+        mealLogs.forEach((log) => {
+            counts[log.recipeName] =
+                (counts[log.recipeName] || 0) + 1;
+        });
+
+        const sorted = Object.entries(counts).sort(
+            (a, b) => b[1] - a[1]
+        );
+
+        return sorted[0]?.[0] || "暂无";
+    }, [mealLogs]);
+
+    function formatDate(dateString: string) {
+        return new Date(dateString).toLocaleDateString(
+            "zh-CN",
+            {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+            }
+        );
     }
 
     return (
         <main className="min-h-screen bg-[#fffaf5] px-5 py-8 pb-32 text-[#2b2b2b]">
             <div className="mx-auto max-w-md">
-                <header className="mb-8">
-                    <p className="text-sm text-gray-500">
-                        我们的吃饭记忆
-                    </p>
+                <header className="mb-6">
+                    <div className="flex items-start justify-between gap-3">
+                        <div>
+                            <p className="text-sm text-gray-500">
+                                我们吃过什么
+                            </p>
 
-                    <h1 className="mt-1 text-3xl font-bold">
-                        吃过什么 🍽️
-                    </h1>
+                            <h1 className="mt-1 text-3xl font-bold">
+                                吃饭记录 📖
+                            </h1>
+                        </div>
 
-                    <p className="mt-2 text-sm text-gray-500">
-                        每一顿都会慢慢变成你们自己的饮食记录
+                        <button
+                            onClick={refreshFromCloud}
+                            className="rounded-full bg-white px-3 py-2 text-xs text-gray-500 shadow-sm"
+                        >
+                            ↻ 刷新
+                        </button>
+                    </div>
+
+                    <p className="mt-2 text-xs text-green-600">
+                        {syncStatus}
                     </p>
                 </header>
 
-                <section className="mb-6 grid grid-cols-3 gap-3">
-                    <div className="rounded-3xl bg-white p-4 text-center shadow-sm">
-                        <p className="text-2xl font-bold">
-                            {stats.total}
-                        </p>
-
-                        <p className="mt-1 text-xs text-gray-500">
-                            一起吃过
-                        </p>
-                    </div>
-
-                    <div className="rounded-3xl bg-white p-4 text-center shadow-sm">
-                        <p className="text-2xl font-bold">
-                            {stats.averageRating || "-"}
-                        </p>
-
-                        <p className="mt-1 text-xs text-gray-500">
-                            平均评分
-                        </p>
-                    </div>
-
-                    <div className="rounded-3xl bg-white p-4 text-center shadow-sm">
-                        <p className="truncate text-base font-bold">
-                            {stats.favorite}
-                        </p>
-
-                        <p className="mt-1 text-xs text-gray-500">
-                            最常吃
-                        </p>
-                    </div>
-                </section>
-
-                {logs.length === 0 ? (
-                    <section className="rounded-3xl bg-white p-7 text-center shadow-sm">
-                        <div className="text-5xl">
-                            🍳
-                        </div>
-
-                        <h2 className="mt-4 text-lg font-semibold">
-                            还没有吃饭记录
-                        </h2>
-
-                        <p className="mt-2 text-sm text-gray-500">
-                            完成第一顿以后，这里就会出现你们的记录
+                {!loaded ? (
+                    <section className="rounded-3xl bg-white p-6 text-center shadow-sm">
+                        <p className="text-sm text-gray-400">
+                            正在读取共享历史...
                         </p>
                     </section>
                 ) : (
                     <>
-                        <div className="mb-4 flex items-center justify-between">
-                            <h2 className="text-lg font-semibold">
-                                最近吃过
-                            </h2>
+                        <section className="mb-6 grid grid-cols-3 gap-3">
+                            <div className="rounded-3xl bg-white p-4 text-center shadow-sm">
+                                <p className="text-2xl font-bold">
+                                    {totalMeals}
+                                </p>
 
+                                <p className="mt-1 text-xs text-gray-400">
+                                    顿饭
+                                </p>
+                            </div>
+
+                            <div className="rounded-3xl bg-white p-4 text-center shadow-sm">
+                                <p className="text-2xl font-bold">
+                                    {averageRating
+                                        ? averageRating.toFixed(1)
+                                        : "-"}
+                                </p>
+
+                                <p className="mt-1 text-xs text-gray-400">
+                                    平均评分
+                                </p>
+                            </div>
+
+                            <div className="rounded-3xl bg-white p-4 text-center shadow-sm">
+                                <p className="truncate text-sm font-semibold">
+                                    {favoriteDish}
+                                </p>
+
+                                <p className="mt-1 text-xs text-gray-400">
+                                    最常吃
+                                </p>
+                            </div>
+                        </section>
+
+                        {mealLogs.length > 0 && (
                             <button
                                 onClick={clearAll}
-                                className="text-sm text-gray-400"
+                                className="mb-5 w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-500"
                             >
-                                清空记录
+                                清空全部历史
                             </button>
-                        </div>
+                        )}
 
-                        <div className="space-y-4">
-                            {logs.map((log) => (
-                                <article
-                                    key={log.id}
-                                    className="rounded-3xl bg-white p-5 shadow-sm"
-                                >
-                                    <div className="flex items-start justify-between gap-4">
-                                        <div>
-                                            <h2 className="text-xl font-semibold">
-                                                {log.recipeName}
-                                            </h2>
+                        {mealLogs.length === 0 ? (
+                            <section className="rounded-3xl bg-white p-6 text-center shadow-sm">
+                                <div className="text-4xl">🍽️</div>
 
-                                            <p className="mt-1 text-sm text-gray-500">
-                                                {new Date(
-                                                    log.completedAt
-                                                ).toLocaleDateString("zh-CN", {
-                                                    year: "numeric",
-                                                    month: "long",
-                                                    day: "numeric",
-                                                })}
-                                            </p>
-                                        </div>
+                                <p className="mt-3 font-medium">
+                                    还没有吃饭记录
+                                </p>
 
-                                        <div className="text-right">
-                                            <div className="text-lg">
-                                                {"⭐".repeat(log.rating)}
+                                <p className="mt-1 text-sm text-gray-400">
+                                    完成一顿饭以后会自动出现在这里
+                                </p>
+                            </section>
+                        ) : (
+                            <div className="space-y-4">
+                                {mealLogs.map((log) => (
+                                    <section
+                                        key={log.id}
+                                        className="rounded-3xl bg-white p-5 shadow-sm"
+                                    >
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div>
+                                                <p className="text-xs text-gray-400">
+                                                    {formatDate(log.completedAt)}
+                                                </p>
+
+                                                <h2 className="mt-1 text-xl font-semibold">
+                                                    {log.recipeName}
+                                                </h2>
+
+                                                <p className="mt-2 text-sm text-gray-500">
+                                                    {log.cookedBy}
+                                                </p>
                                             </div>
 
-                                            <p className="mt-1 text-xs text-gray-400">
-                                                {log.rating}/5
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    <div className="mt-4 grid grid-cols-2 gap-3">
-                                        <div className="rounded-2xl bg-[#fffaf5] p-3">
-                                            <p className="text-xs text-gray-400">
-                                                谁做的
-                                            </p>
-
-                                            <p className="mt-1 text-sm font-medium">
-                                                👨‍🍳 {log.cookedBy}
-                                            </p>
+                                            <button
+                                                onClick={() =>
+                                                    deleteLog(log.id)
+                                                }
+                                                className="text-xs text-gray-400"
+                                            >
+                                                删除
+                                            </button>
                                         </div>
 
-                                        <div className="rounded-2xl bg-[#fffaf5] p-3">
-                                            <p className="text-xs text-gray-400">
-                                                下次还吃吗
-                                            </p>
-
-                                            <p className="mt-1 text-sm font-medium">
-                                                ❤️ {log.eatAgain}
-                                            </p>
+                                        <div className="mt-4 flex items-center gap-1">
+                                            {[1, 2, 3, 4, 5].map((star) => (
+                                                <span
+                                                    key={star}
+                                                    className="text-xl"
+                                                >
+                                                    {star <= log.rating
+                                                        ? "⭐"
+                                                        : "☆"}
+                                                </span>
+                                            ))}
                                         </div>
-                                    </div>
 
-                                    {log.notes && (
                                         <div className="mt-4 rounded-2xl bg-[#fffaf5] p-4">
-                                            <p className="text-xs text-gray-400">
-                                                我们的备注
+                                            <p className="text-sm">
+                                                下次还吃：
+                                                <span className="font-medium">
+                                                    {log.eatAgain}
+                                                </span>
                                             </p>
 
-                                            <p className="mt-1 text-sm text-gray-600">
-                                                {log.notes}
-                                            </p>
+                                            {log.notes && (
+                                                <p className="mt-2 text-sm text-gray-500">
+                                                    {log.notes}
+                                                </p>
+                                            )}
                                         </div>
-                                    )}
-
-                                    <button
-                                        onClick={() => deleteLog(log.id)}
-                                        className="mt-4 text-sm text-gray-400"
-                                    >
-                                        删除这条记录
-                                    </button>
-                                </article>
-                            ))}
-                        </div>
+                                    </section>
+                                ))}
+                            </div>
+                        )}
                     </>
                 )}
             </div>
